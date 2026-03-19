@@ -99,12 +99,7 @@
           title.innerHTML = "Runtime error – check console";
         }
       }
-      let gameStarted = false;
       function startGame() {
-        if (gameStarted) {
-          return;
-        }
-        gameStarted = true;
         document.getElementById("start").style.display = "none";
         callMain();
         document.addEventListener("touchstart", function (ev) {
@@ -187,7 +182,7 @@
           let display = "";
           if (text.includes("Running...")) {
             display = "Loading...";
-            startGame();
+            document.getElementById("start").style.display = "block";
           } else if (text.includes("Downloading data...")) {
             display = text;
           }
