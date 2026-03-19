@@ -4,6 +4,7 @@ Serve the generated WebAssembly bundle with the isolation headers that Emscripte
 pthread builds require (COOP/COEP/CORP). Example:
 
   python3 tools/emscripten-web-serve.py --root build-emscripten-web --port 8000
+  python3 tools/emscripten-web-serve.py --root build-emscripten-web-dev --port 8000
 """
 
 from __future__ import annotations
@@ -72,7 +73,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         default=str(default_root),
-        help=f"Directory to serve (default: {default_root})",
+        help=(
+            f"Directory to serve (default: {default_root}; "
+            "dev builds commonly use build-emscripten-web-dev)"
+        ),
     )
     parser.add_argument("--port", type=int, default=8080, help="Port to bind (default: 8080)")
     parser.add_argument("--bind", default="0.0.0.0", help="Interface/IP to bind (default: 0.0.0.0)")

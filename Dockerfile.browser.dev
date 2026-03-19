@@ -1,0 +1,105 @@
+# syntax=docker/dockerfile:1.7
+
+# Development-oriented browser build. This keeps the Docker workflow familiar
+# while preserving BuildKit caches across rebuilds for faster local iteration.
+FROM ubuntu:24.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -y
+RUN apt-get -y full-upgrade
+
+RUN apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    ninja-build \
+    pkg-config \
+    python3 \
+    python3-pip \
+    unzip \
+    xz-utils \
+    zip \
+ && rm -rf /var/lib/apt/lists/*
+
+SHELL ["/bin/bash", "-lc"]
+
+WORKDIR /opt
+RUN git clone --filter=blob:none --single-branch --depth 1 https://github.com/emscripten-core/emsdk.git emsdk \
+ && /opt/emsdk/emsdk install latest \
+ && /opt/emsdk/emsdk activate latest
+
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV VCPKG_FORCE_SYSTEM_BINARIES=1
+COPY vcpkg.json /tmp/vcpkg.json
+RUN git clone --filter=blob:none https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} \
+ && cd ${VCPKG_ROOT} \
+ && git checkout "$(grep 'builtin-baseline' /tmp/vcpkg.json | cut -d'"' -f4)" \
+ && ./bootstrap-vcpkg.sh
+
+WORKDIR /tmp/vcpkg-manifest
+COPY vcpkg.json /tmp/vcpkg-manifest/vcpkg.json
+COPY browser/overlay-ports /tmp/vcpkg-manifest/browser/overlay-ports
+COPY browser/triplets /tmp/vcpkg-manifest/browser/triplets
+RUN --mount=type=cache,id=otclient-browser-dev-vcpkg-buildtrees,target=/opt/vcpkg/buildtrees \
+    --mount=type=cache,id=otclient-browser-dev-vcpkg-downloads,target=/opt/vcpkg/downloads \
+    --mount=type=cache,id=otclient-browser-dev-vcpkg-packages,target=/opt/vcpkg/packages \
+    --mount=type=cache,id=otclient-browser-dev-emscripten-cache,target=/opt/emsdk/upstream/emscripten/cache \
+    source /opt/emsdk/emsdk_env.sh \
+ && cd /tmp/vcpkg-manifest \
+ && /opt/vcpkg/vcpkg install \
+    --triplet=wasm32-emscripten-pthread \
+    --overlay-triplets=/tmp/vcpkg-manifest/browser/triplets \
+    --overlay-ports=/tmp/vcpkg-manifest/browser/overlay-ports
+
+WORKDIR /workspace
+# NOSONAR: .dockerignore constrains the build context to tracked source assets required for this build stage
+COPY . /workspace
+
+ARG BUILD_TYPE=RelWithDebInfo
+ARG JOBS=2
+ARG EMCC_CORES=1
+ARG BINARYEN_CORES=1
+ENV CACHE_BUILD_DIR=/workspace/build-emscripten
+ENV ARTIFACT_DIR=/workspace/build-emscripten-artifacts
+RUN --mount=type=cache,id=otclient-browser-dev-build-dir,target=/workspace/build-emscripten \
+    --mount=type=cache,id=otclient-browser-dev-vcpkg-buildtrees,target=/opt/vcpkg/buildtrees \
+    --mount=type=cache,id=otclient-browser-dev-vcpkg-downloads,target=/opt/vcpkg/downloads \
+    --mount=type=cache,id=otclient-browser-dev-vcpkg-packages,target=/opt/vcpkg/packages \
+    --mount=type=cache,id=otclient-browser-dev-emscripten-cache,target=/opt/emsdk/upstream/emscripten/cache \
+    source /opt/emsdk/emsdk_env.sh \
+ && mkdir -p ${CACHE_BUILD_DIR} \
+ && if [ -f ${CACHE_BUILD_DIR}/CMakeCache.txt ] \
+    && ! grep -q "^CMAKE_CACHEFILE_DIR:INTERNAL=${CACHE_BUILD_DIR}$" ${CACHE_BUILD_DIR}/CMakeCache.txt; then \
+      find ${CACHE_BUILD_DIR} -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+    fi \
+ && cmake -G Ninja -S /workspace -B ${CACHE_BUILD_DIR} \
+    -DWASM=ON \
+    -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=/opt/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
+    -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+    -DVCPKG_TARGET_TRIPLET=wasm32-emscripten-pthread \
+    -DVCPKG_OVERLAY_TRIPLETS=/workspace/browser/triplets \
+    -DVCPKG_OVERLAY_PORTS=/workspace/browser/overlay-ports \
+    -DVCPKG_BUILD_TYPE=${BUILD_TYPE} \
+    -DWASM_USE_WASM_EXCEPTIONS=OFF \
+    -DOPTIONS_ENABLE_IPO=OFF \
+    -DTOGGLE_BIN_FOLDER=ON \
+    -DTOGGLE_BOT_PROTECTION=OFF \
+    -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+    -DCMAKE_CXX_STANDARD=20 \
+    -DCMAKE_C_FLAGS="-pthread -matomics -mbulk-memory -fno-lto" \
+    -DCMAKE_CXX_FLAGS="-pthread -matomics -mbulk-memory -fno-lto -std=c++20 -D_LIBCPP_DISABLE_AVAILABILITY -fexperimental-library" \
+    -DCMAKE_EXE_LINKER_FLAGS="-pthread -matomics -mbulk-memory -s ALLOW_MEMORY_GROWTH=1 -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=4 -s WASM=1 -s NO_EXIT_RUNTIME=1 -fno-lto" \
+    -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG -fno-lto" \
+    -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g1 -DNDEBUG -fno-lto" \
+    -DCMAKE_CXX_FLAGS_DEBUG="-O0 -g1 -fno-lto" \
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+ && EMCC_CORES=${EMCC_CORES} BINARYEN_CORES=${BINARYEN_CORES} cmake --build ${CACHE_BUILD_DIR} --target otclient -j"${JOBS}" \
+ && rm -rf ${ARTIFACT_DIR} \
+ && mkdir -p ${ARTIFACT_DIR} \
+ && cp -a ${CACHE_BUILD_DIR}/bin ${ARTIFACT_DIR}/
+
+FROM busybox:latest AS web-artifacts
+WORKDIR /otclient-web
+COPY --from=builder /workspace/build-emscripten-artifacts/bin/ .
+CMD ["sh"]
