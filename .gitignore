@@ -26,6 +26,8 @@ cmake-build-*/
 vcpkg_installed/
 vc17/
 /build-emscripten-web/
+/build-emscripten-web-dev/
+/build-emscripten-dev/
 
 # MSTest test Results
 [Tt]est[Rr]esult*/

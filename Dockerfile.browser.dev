@@ -1,0 +1,58 @@
+# run from the repository root, e.g.
+#   bash Dockerfile.browser.dev.sh
+FROM ubuntu:24.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    ninja-build \
+    pkg-config \
+    python3 \
+    python3-pip \
+    unzip \
+    xz-utils \
+    zip \
+ && rm -rf /var/lib/apt/lists/*
+
+SHELL ["/bin/bash", "-lc"]
+
+WORKDIR /opt
+RUN git clone --filter=blob:none --single-branch --depth 1 https://github.com/emscripten-core/emsdk.git emsdk \
+ && /opt/emsdk/emsdk install latest \
+ && /opt/emsdk/emsdk activate latest
+
+ENV VCPKG_ROOT=/opt/vcpkg
+RUN git clone https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} \
+ && cd ${VCPKG_ROOT} \
+ && ./bootstrap-vcpkg.sh
+
+WORKDIR /workspace
+
+ARG BUILD_TYPE=Release
+ENV BUILD_DIR=/workspace/build-emscripten-dev
+CMD source /opt/emsdk/emsdk_env.sh \
+ && mkdir -p "${BUILD_DIR}" \
+ && cmake -G Ninja -S /workspace -B "${BUILD_DIR}" \
+    -DWASM=ON \
+    -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=/opt/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
+    -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+    -DVCPKG_TARGET_TRIPLET=wasm32-emscripten-pthread \
+    -DVCPKG_OVERLAY_TRIPLETS=/workspace/browser/triplets \
+    -DVCPKG_OVERLAY_PORTS=/workspace/browser/overlay-ports \
+    -DVCPKG_BUILD_TYPE=${BUILD_TYPE} \
+    -DWASM_USE_WASM_EXCEPTIONS=OFF \
+    -DOPTIONS_ENABLE_IPO=OFF \
+    -DTOGGLE_BIN_FOLDER=ON \
+    -DTOGGLE_BOT_PROTECTION=OFF \
+    -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+    -DCMAKE_CXX_STANDARD=20 \
+    -DCMAKE_C_FLAGS="-pthread -matomics -mbulk-memory -fno-lto" \
+    -DCMAKE_CXX_FLAGS="-pthread -matomics -mbulk-memory -fno-lto -std=c++20 -D_LIBCPP_DISABLE_AVAILABILITY -fexperimental-library" \
+    -DCMAKE_EXE_LINKER_FLAGS="-pthread -matomics -mbulk-memory -s ALLOW_MEMORY_GROWTH=1 -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=4 -s WASM=1 -s NO_EXIT_RUNTIME=1 -fno-lto" \
+    -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG -fno-lto" \
+    -DCMAKE_CXX_FLAGS_DEBUG="-O0 -g -fno-lto" \
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+ && cmake --build "${BUILD_DIR}" --target otclient -j"$(nproc)"
